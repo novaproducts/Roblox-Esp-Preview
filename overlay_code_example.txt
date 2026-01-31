@@ -1,0 +1,297 @@
+// this is a example for retards who cant load a texture properly.
+// expect some issues this is an EXAMPLE...
+
+static bool model_parsed = false;
+static c_obj_model parsed_model;
+static std::string last_loaded_user_id;
+
+static std::unordered_map<std::string, float> rotation_map;
+static std::unordered_map<std::string, float> pitch_map;
+static std::unordered_map<std::string, float> zoom_map;
+static std::unordered_map<std::string, float> ambient_map;
+static std::unordered_map<std::string, float> diffuse_map;
+
+std::string local_user_id = "";
+std::uint64_t local_player_address = memory->read<std::uint64_t>(game::players.address + Offsets::Player::LocalPlayer);
+if (local_player_address != 0) {
+    std::uint64_t user_id = memory->read<std::uint64_t>(local_player_address + Offsets::Player::UserId);
+    local_user_id = std::to_string(user_id);
+}
+
+c_avatar_3d_data* avatar_3d = c_avatar_3d_api::get().request_data(local_user_id);
+e_avatar_3d_load_state load_state = c_avatar_3d_api::get().get_state(local_user_id);
+
+ImVec2 child_size = ImGui::GetContentRegionAvail();
+
+if (load_state == e_avatar_3d_load_state::loading || load_state == e_avatar_3d_load_state::not_loaded) {
+    ImVec2 text_size = ImGui::CalcTextSize("Loading 3D Avatar...");
+    ImGui::SetCursorPos(ImVec2((child_size.x - text_size.x) * 0.5f, child_size.y * 0.5f));
+    ImGui::TextColored(ImVec4(0.41f, 0.0f, 1.0f, 1.0f), "Loading 3D Avatar...");
+}
+else if (load_state == e_avatar_3d_load_state::failed) {
+    ImVec2 text_size = ImGui::CalcTextSize("Failed to load 3D avatar");
+    ImGui::SetCursorPos(ImVec2((child_size.x - text_size.x) * 0.5f, child_size.y * 0.5f));
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.4f, 1.0f), "Failed to load 3D avatar");
+}
+else if (avatar_3d && avatar_3d->ready) {
+    if (last_loaded_user_id != local_user_id || !model_parsed) {
+        c_texture_cache::get().clear_user(local_user_id);
+
+        model_parsed = c_avatar_3d_api::get().parse_obj_model(avatar_3d->obj_data, parsed_model);
+
+        if (model_parsed && !avatar_3d->mtl_data.empty()) {
+            bool mtl_parsed = c_avatar_3d_api::get().parse_mtl_data(avatar_3d->mtl_data, parsed_model, avatar_3d->texture_hashes);
+
+            if (mtl_parsed && !avatar_3d->texture_data.empty()) {
+                std::unordered_set<int> requested_indices;
+
+                for (const auto& mat_pair : parsed_model.materials) {
+                    int tex_idx = mat_pair.second.texture_index;
+                    if (tex_idx >= 0 && tex_idx < static_cast<int>(avatar_3d->texture_data.size()) &&
+                        !avatar_3d->texture_data[tex_idx].empty() &&
+                        requested_indices.find(tex_idx) == requested_indices.end()) {
+
+                        c_texture_cache::get().request_texture(local_user_id, tex_idx, avatar_3d->texture_data[tex_idx], true);
+                        requested_indices.insert(tex_idx);
+                    }
+                }
+            }
+        }
+        last_loaded_user_id = local_user_id;
+    }
+
+    ImDrawList* preview_draw = ImGui::GetWindowDrawList();
+    ImVec2 child_window_pos = ImGui::GetWindowPos();
+    ImVec2 canvas_min = child_window_pos + ImGui::GetStyle().WindowPadding;
+    float preview_width = child_size.x;
+    float available_height = child_size.y;
+    ImVec2 canvas_center = ImVec2(canvas_min.x + preview_width * 0.5f, canvas_min.y + available_height * 0.5f);
+
+    if (rotation_map.find(local_user_id) == rotation_map.end()) rotation_map[local_user_id] = 0.0f;
+    if (pitch_map.find(local_user_id) == pitch_map.end()) pitch_map[local_user_id] = 0.0f;
+    if (zoom_map.find(local_user_id) == zoom_map.end()) zoom_map[local_user_id] = 1.2f;
+    if (ambient_map.find(local_user_id) == ambient_map.end()) ambient_map[local_user_id] = 1.0f;
+    if (diffuse_map.find(local_user_id) == diffuse_map.end()) diffuse_map[local_user_id] = 1.0f;
+
+    float& rotation = rotation_map[local_user_id];
+    float& pitch = pitch_map[local_user_id];
+    float& zoom = zoom_map[local_user_id];
+    float& ambient = ambient_map[local_user_id];
+    float& diffuse = diffuse_map[local_user_id];
+
+    rotation += 0.01f;
+    if (rotation > 3.14159f * 2.0f) rotation -= 3.14159f * 2.0f;
+
+    float preview_min_x = FLT_MAX, preview_min_y = FLT_MAX;
+    float preview_max_x = -FLT_MAX, preview_max_y = -FLT_MAX;
+
+    if (model_parsed && !parsed_model.vertices.empty()) {
+        float aabb_width = avatar_3d->aabb.max[0] - avatar_3d->aabb.min[0];
+        float aabb_height = avatar_3d->aabb.max[1] - avatar_3d->aabb.min[1];
+        float aabb_depth = avatar_3d->aabb.max[2] - avatar_3d->aabb.min[2];
+        float max_dim = max(aabb_width, max(aabb_height, aabb_depth));
+
+        float base_scale = 200.0f / max_dim;
+        float auto_fit_zoom = zoom;
+        if (max_dim > 10.0f) {
+            auto_fit_zoom = zoom * (10.0f / max_dim);
+        }
+
+        float scale = base_scale * auto_fit_zoom;
+
+        float cos_rot = std::cos(rotation);
+        float sin_rot = std::sin(rotation);
+        float cos_pitch = std::cos(pitch);
+        float sin_pitch = std::sin(pitch);
+
+        float aabb_center_x = (avatar_3d->aabb.min[0] + avatar_3d->aabb.max[0]) * 0.5f;
+        float aabb_center_y = (avatar_3d->aabb.min[1] + avatar_3d->aabb.max[1]) * 0.5f;
+        float aabb_center_z = (avatar_3d->aabb.min[2] + avatar_3d->aabb.max[2]) * 0.5f;
+
+        std::vector<std::tuple<float, int>> depth_sorted_faces;
+        depth_sorted_faces.reserve(parsed_model.faces.size());
+
+        for (size_t i = 0; i < parsed_model.faces.size(); i++) {
+            const auto& face = parsed_model.faces[i];
+            float avg_z = 0.0f;
+
+            for (int j = 0; j < 3; j++) {
+                const auto& v = parsed_model.vertices[face.vertex_indices[j]];
+                float x = v.x - aabb_center_x;
+                float y = v.y - aabb_center_y;
+                float z = v.z - aabb_center_z;
+
+                float rotated_x = x * cos_rot - z * sin_rot;
+                float rotated_z = x * sin_rot + z * cos_rot;
+                float final_z = y * sin_pitch + rotated_z * cos_pitch;
+
+                avg_z += final_z;
+            }
+            avg_z /= 3.0f;
+            depth_sorted_faces.push_back(std::make_tuple(avg_z, static_cast<int>(i)));
+        }
+
+        std::sort(depth_sorted_faces.begin(), depth_sorted_faces.end(),
+            [](const std::tuple<float, int>& a, const std::tuple<float, int>& b) { return std::get<0>(a) < std::get<0>(b); });
+
+        float light_dir_x = 0.5f;
+        float light_dir_y = 0.8f;
+        float light_dir_z = -0.3f;
+        float light_len = std::sqrt(light_dir_x * light_dir_x + light_dir_y * light_dir_y + light_dir_z * light_dir_z);
+        light_dir_x /= light_len;
+        light_dir_y /= light_len;
+        light_dir_z /= light_len;
+
+        for (const auto& face_tuple : depth_sorted_faces) {
+            int face_idx = std::get<1>(face_tuple);
+            const auto& face = parsed_model.faces[face_idx];
+
+            ImVec2 screen_points[3];
+            float transformed_vertices[3][3];
+            float uv_coords[3][2];
+            bool has_uvs = false;
+
+            for (int j = 0; j < 3; j++) {
+                const auto& v = parsed_model.vertices[face.vertex_indices[j]];
+                float x = v.x - aabb_center_x;
+                float y = v.y - aabb_center_y;
+                float z = v.z - aabb_center_z;
+
+                float rotated_x = x * cos_rot - z * sin_rot;
+                float rotated_z = x * sin_rot + z * cos_rot;
+                float final_y = y * cos_pitch - rotated_z * sin_pitch;
+                float final_z = y * sin_pitch + rotated_z * cos_pitch;
+
+                transformed_vertices[j][0] = rotated_x;
+                transformed_vertices[j][1] = final_y;
+                transformed_vertices[j][2] = final_z;
+
+                screen_points[j] = ImVec2(canvas_center.x + rotated_x * scale, canvas_center.y - final_y * scale);
+                
+                preview_min_x = min(preview_min_x, screen_points[j].x);
+                preview_min_y = min(preview_min_y, screen_points[j].y);
+                preview_max_x = max(preview_max_x, screen_points[j].x);
+                preview_max_y = max(preview_max_y, screen_points[j].y);
+
+                if (face.texcoord_indices.size() >= 3) {
+                    int uv_idx = face.texcoord_indices[j];
+                    if (uv_idx >= 0 && uv_idx < static_cast<int>(parsed_model.tex_coords.size())) {
+                        uv_coords[j][0] = parsed_model.tex_coords[uv_idx].u;
+                        uv_coords[j][1] = parsed_model.tex_coords[uv_idx].v;
+                        has_uvs = true;
+                    }
+                    else {
+                        has_uvs = false;
+                        break;
+                    }
+                }
+            }
+
+            float v1x = transformed_vertices[1][0] - transformed_vertices[0][0];
+            float v1y = transformed_vertices[1][1] - transformed_vertices[0][1];
+            float v1z = transformed_vertices[1][2] - transformed_vertices[0][2];
+
+            float v2x = transformed_vertices[2][0] - transformed_vertices[0][0];
+            float v2y = transformed_vertices[2][1] - transformed_vertices[0][1];
+            float v2z = transformed_vertices[2][2] - transformed_vertices[0][2];
+
+            float face_normal_x = v1y * v2z - v1z * v2y;
+            float face_normal_y = v1z * v2x - v1x * v2z;
+            float face_normal_z = v1x * v2y - v1y * v2x;
+
+            float nlen = std::sqrt(face_normal_x * face_normal_x + face_normal_y * face_normal_y + face_normal_z * face_normal_z);
+            if (nlen > 0.0001f) {
+                face_normal_x /= nlen;
+                face_normal_y /= nlen;
+                face_normal_z /= nlen;
+            }
+
+            float dotProduct = face_normal_x * light_dir_x + face_normal_y * light_dir_y + face_normal_z * light_dir_z;
+            dotProduct = max(0.0f, dotProduct);
+            float lighting = ambient + (diffuse * dotProduct);
+            lighting = min(1.0f, max(0.4f, lighting));
+
+            float r = 0.5f, g = 0.5f, b = 0.5f;
+            c_decoded_texture* texture = nullptr;
+
+            if (!face.material_name.empty()) {
+                auto mat_it = parsed_model.materials.find(face.material_name);
+                if (mat_it != parsed_model.materials.end()) {
+                    const c_obj_material& material = mat_it->second;
+                    r = material.diffuse[0];
+                    g = material.diffuse[1];
+                    b = material.diffuse[2];
+
+                    if (material.texture_index >= 0 && has_uvs) {
+                        texture = c_texture_cache::get().get_texture(local_user_id, material.texture_index);
+                        if (!texture || !texture->ready.load(std::memory_order_acquire)) {
+                            texture = nullptr;
+                        }
+                    }
+                }
+            }
+
+            if (texture && has_uvs) {
+                ImVec2 min_pt = screen_points[0];
+                ImVec2 max_pt = screen_points[0];
+
+                for (int j = 1; j < 3; j++) {
+                    min_pt.x = min(min_pt.x, screen_points[j].x);
+                    min_pt.y = min(min_pt.y, screen_points[j].y);
+                    max_pt.x = max(max_pt.x, screen_points[j].x);
+                    max_pt.y = max(max_pt.y, screen_points[j].y);
+                }
+
+                int min_x = max(0, static_cast<int>(std::floor(min_pt.x)));
+                int min_y = max(0, static_cast<int>(std::floor(min_pt.y)));
+                int max_x = min(static_cast<int>(canvas_min.x + preview_width), static_cast<int>(std::ceil(max_pt.x)));
+                int max_y = min(static_cast<int>(canvas_min.y + available_height), static_cast<int>(std::ceil(max_pt.y)));
+
+                float denom = (screen_points[1].y - screen_points[2].y) * (screen_points[0].x - screen_points[2].x) +
+                    (screen_points[2].x - screen_points[1].x) * (screen_points[0].y - screen_points[2].y);
+
+                if (std::abs(denom) > 0.0001f) {
+                    for (int py = min_y; py <= max_y; py++) {
+                        for (int px = min_x; px <= max_x; px++) {
+                            float w0 = ((screen_points[1].y - screen_points[2].y) * (px - screen_points[2].x) +
+                                (screen_points[2].x - screen_points[1].x) * (py - screen_points[2].y)) / denom;
+                            float w1 = ((screen_points[2].y - screen_points[0].y) * (px - screen_points[2].x) +
+                                (screen_points[0].x - screen_points[2].x) * (py - screen_points[2].y)) / denom;
+                            float w2 = 1.0f - w0 - w1;
+
+                            if (w0 >= 0 && w1 >= 0 && w2 >= 0) {
+                                float u = w0 * uv_coords[0][0] + w1 * uv_coords[1][0] + w2 * uv_coords[2][0];
+                                float v = w0 * uv_coords[0][1] + w1 * uv_coords[1][1] + w2 * uv_coords[2][1];
+
+                                float texR, texG, texB, texA;
+                                texture->sample(u, v, texR, texG, texB, texA);
+
+                                float final_r = min(1.0f, texR * lighting);
+                                float final_g = min(1.0f, texG * lighting);
+                                float final_b = min(1.0f, texB * lighting);
+
+                                ImU32 pixel_color = IM_COL32(static_cast<int>(final_r * 255),
+                                    static_cast<int>(final_g * 255),
+                                    static_cast<int>(final_b * 255), 255);
+
+                                preview_draw->AddRectFilled(ImVec2(static_cast<float>(px), static_cast<float>(py)),
+                                    ImVec2(static_cast<float>(px + 1), static_cast<float>(py + 1)), pixel_color);
+                            }
+                        }
+                    }
+                }
+            }
+            else {
+                r = min(1.0f, r * lighting);
+                g = min(1.0f, g * lighting);
+                b = min(1.0f, b * lighting);
+
+                ImU32 fillColor = IM_COL32(static_cast<int>(r * 255),
+                    static_cast<int>(g * 255),
+                    static_cast<int>(b * 255), 255);
+
+                preview_draw->AddTriangleFilled(screen_points[0], screen_points[1], screen_points[2], fillColor);
+            }
+        }
+    }
+}
